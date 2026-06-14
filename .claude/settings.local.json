@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c ' *)",
+      "Bash(python -X utf8 smoke_test.py)",
+      "Bash(python -X utf8 -m src.classifier)",
+      "Bash(python -X utf8 -m src.uncertainty_scorer)",
+      "Bash(pip install *)",
+      "Bash(python -X utf8 -m pytest tests/test_pipeline.py -v --tb=short)",
+      "Bash(python -X utf8 -m pytest tests/test_pipeline.py -v --tb=short -q)"
+    ]
+  }
+}
