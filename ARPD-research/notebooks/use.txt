@@ -1,0 +1,39 @@
+Hướng dẫn dùng ARPD_FULL_LIAR_FEVER_Wiki.ipynb
+
+Bước 0 — Chuẩn bị trước khi mở Colab
+Trên máy local, đảm bảo có sẵn 2 thứ:
+1. Thư mục src/ với 8 file .py:
+   __init__.py, data_loader.py, uncertainty_scorer.py,
+   adaptive_retriever.py, paraphrase_augmentor.py,
+   encoder.py, classifier.py, pipeline.py
+
+2. File liar_dataset.zip (nếu chưa có sẵn trên Google Drive 
+   tại /ARPD-research/liar_dataset.zip)
+
+Bước 1 — Upload notebook lên Colab
+
+Vào colab.research.google.com
+File → Upload notebook → chọn ARPD_FULL_LIAR_FEVER_Wiki.ipynb
+
+
+Bước 2 — Bật GPU
+Runtime → Change runtime type → T4 GPU → Save
+
+Bước 3 — Chạy từng Section theo thứ tự
+Đừng dùng "Run all" — vì có 2 cell cần bạn tương tác (upload file). Chạy từng cell bằng nút ▶, đợi xong mới qua cell tiếp.
+CellViệc bạn cần làm0.1Click link → đăng nhập Google → paste code xác thực0.2Hiện nút "Choose Files" → chọn cả 8 file .py trong src/0.3 - 0.5Tự chạy, chỉ cần đợi0.6Nếu chưa có LIAR trên Drive → hiện nút upload → chọn liar_dataset.zip0.7Tự chạy, mất ~5 phút (encode 10K claims)
+Sau Section 0, các Section 1 → 8 chạy hoàn toàn tự động, không cần tương tác — cứ bấm ▶ lần lượt và đợi.
+
+Bước 4 — Theo dõi thời gian
+Section 0: ~10 phút   (setup)
+Section 1: ~5 phút    (baselines)
+Section 2: ~10 phút   (ARPD)
+Section 3: ~25 phút   (5 seeds — lâu nhất)
+Section 4: ~25 phút   (robustness — cũng lâu)
+Section 5: ~20 phút   (ablation)
+Section 6: ~20-25 phút (download wiki 1.7GB + build index — LÂU NHẤT)
+Section 7: ~15 phút   (FEVER)
+Section 8: ~1 phút    (export)
+─────────────────────
+Tổng: ~90-120 phút
+Đừng đóng tab trong lúc chạy. Có thể mở tab khác làm việc song song, Colab vẫn chạy ngầm.
