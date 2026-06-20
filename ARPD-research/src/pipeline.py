@@ -1,32 +1,31 @@
 """
-ARPD Full Pipeline — ghép 5 thành phần:
+ARPD Full Pipeline — Offline Cached Version
   1. UncertaintyScorer  → k_adaptive per claim
-  2. AdaptiveRetriever  → evidence passages
-  3. ParaphraseAugmentor → training augmentation
-  4. ClaimEvidenceEncoder → feature vectors
-  5. ARPDTrainer / ARPDClassifier → binary prediction
+  2. ParaphraseAugmentor → training augmentation
+  3. ClaimEvidenceEncoder → feature vectors
+  4. ARPDTrainer / ARPDClassifier → binary prediction
 
-Hai chế độ:
-  - fit():     Train ARPD từ đầu (bao gồm augmentation).
-  - predict(): Inference cho claim mới.
+Chế độ:
+  - fit():     Train ARPD sử dụng local cache và paraphrase augmentation.
+  - predict(): Inference sử dụng local test cache.
 """
 
 from __future__ import annotations
 
+import ast
 import numpy as np
 import pandas as pd
 from pathlib import Path
 from tqdm import tqdm
 
 from .uncertainty_scorer import UncertaintyScorer
-from .adaptive_retriever import AdaptiveRetriever
-from .paraphrase_augmentor import augment_dataset, ensure_nltk_data, synonym_substitute
+from .paraphrase_augmentor import augment_dataset, ensure_nltk_data
 from .encoder import ClaimEvidenceEncoder
 from .classifier import ARPDTrainer
 
 
 class ARPDPipeline:
-    """End-to-end ARPD pipeline."""
+    """End-to-end ARPD pipeline (Strictly Offline Caches)."""
 
     def __init__(
         self,
@@ -36,54 +35,35 @@ class ARPDPipeline:
         p_synonym: float = 0.15,
         encoder_model: str = "sentence-transformers/all-MiniLM-L6-v2",
         device: str | None = None,
-        retriever_sleep: float = 0.3,
+        cached_train_path: str | Path | None = None,
+        cached_val_path: str | Path | None = None,
     ) -> None:
-        """
-        Args:
-            k_min: Số evidence tối thiểu.
-            k_max: Số evidence tối đa.
-            augmentation_method: "synonym" | "backtranslate" | "both" | "none".
-            p_synonym: Xác suất synonym substitution.
-            encoder_model: SentenceTransformer model name.
-            device: "cuda" | "cpu" | None.
-            retriever_sleep: Giây nghỉ giữa Wikipedia calls.
-        """
         self.augmentation_method = augmentation_method
         self.p_synonym = p_synonym
+        self.cached_train_path = cached_train_path
+        self.cached_val_path = cached_val_path
 
-        self.scorer = UncertaintyScorer(
-            model_name=encoder_model, k_min=k_min, k_max=k_max
-        )
-        self.retriever = AdaptiveRetriever(sleep_between=retriever_sleep)
+        self.scorer = UncertaintyScorer(model_name=encoder_model, k_min=k_min, k_max=k_max)
         self.encoder = ClaimEvidenceEncoder(model_name=encoder_model, device=device)
         self.trainer = ARPDTrainer(input_dim=384, device=device)
 
         ensure_nltk_data()
 
-    # ------------------------------------------------------------------
-    # Internal helpers
-    # ------------------------------------------------------------------
+    def _load_cached_evidence(self, claims: list[str], cache_path: str | Path, desc: str) -> list[list[str]]:
+        """Loads pre-retrieved evidence from CSV and aligns it with the requested claims."""
+        if not cache_path or not Path(cache_path).exists():
+            raise FileNotFoundError(f"Cache file not found at {cache_path}")
+            
+        print(f"[{desc}] Reading cache from {cache_path}...")
+        df = pd.read_csv(cache_path)
+        
+        df['evidence'] = df['evidence'].apply(lambda x: ast.literal_eval(x) if isinstance(x, str) else [])
+        cache_dict = dict(zip(df['claim'], df['evidence']))
+        
+        return [cache_dict.get(claim, []) for claim in claims]
 
-    def _retrieve_all(
-        self, claims: list[str], k_list: list[int], desc: str = "Retrieving"
-    ) -> list[list[str]]:
-        """Retrieve evidence cho toàn bộ claims với progress bar."""
-        results = []
-        for claim, k in tqdm(zip(claims, k_list), total=len(claims), desc=desc):
-            results.append(self.retriever.retrieve(claim, k))
-        return results
-
-    def _featurize(
-        self,
-        claims: list[str],
-        passages_list: list[list[str]],
-        desc: str = "Encoding",
-    ) -> np.ndarray:
+    def _featurize(self, claims: list[str], passages_list: list[list[str]], desc: str = "Encoding") -> np.ndarray:
         return self.encoder.encode_batch(claims, passages_list, show_progress=True)
-
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
 
     def fit(
         self,
@@ -94,125 +74,99 @@ class ARPDPipeline:
         epochs: int = 20,
         batch_size: int = 64,
         patience: int = 5,
-        retrieve_evidence: bool = True,
         verbose: bool = True,
     ) -> list[dict]:
-        """
-        Train ARPD pipeline.
-
-        Args:
-            train_claims / train_labels: Training data.
-            val_claims / val_labels: Validation data.
-            retrieve_evidence: Có gọi Wikipedia không (tắt để debug nhanh).
-            ...
-
-        Returns:
-            Training history (list of dicts).
-        """
-        # Bước 1: Fit uncertainty scorer trên training claims
+        """Train ARPD pipeline via local evidence files."""
         if verbose:
-            print("[1/5] Fitting uncertainty scorer...")
+            print("[1/4] Fitting uncertainty scorer...")
         self.scorer.fit_reference(train_claims)
 
-        # Bước 2: Tính k_adaptive cho training set
         if verbose:
-            print("[2/5] Computing adaptive k values...")
-        k_list_train = self.scorer.batch_compute_k(train_claims)
-
-        # Bước 3: Augmentation
+            print("[2/4] Augmenting training data...")
         aug_claims, aug_labels = train_claims, train_labels
         if self.augmentation_method != "none":
-            if verbose:
-                print(f"[3/5] Augmenting training data (method={self.augmentation_method})...")
             aug_claims, aug_labels = augment_dataset(
                 train_claims, train_labels,
                 method=self.augmentation_method,
                 p_synonym=self.p_synonym,
             )
-            # k_list cho phần augmented = same as original
-            k_list_train = k_list_train + k_list_train
-        else:
-            if verbose:
-                print("[3/5] Skipping augmentation.")
 
-        # Bước 4: Retrieve evidence
-        if retrieve_evidence:
-            if verbose:
-                print("[4/5] Retrieving Wikipedia evidence for training set...")
-            passages_train = self._retrieve_all(aug_claims, k_list_train, "Train retrieve")
-
-            if verbose:
-                print("[4/5] Retrieving Wikipedia evidence for validation set...")
-            k_list_val = self.scorer.batch_compute_k(val_claims)
-            passages_val = self._retrieve_all(val_claims, k_list_val, "Val retrieve")
-        else:
-            passages_train = [[] for _ in aug_claims]
-            passages_val = [[] for _ in val_claims]
-
-        # Bước 5: Encode
         if verbose:
-            print("[5/5] Encoding train features...")
+            print("[3/4] Loading evidence from persistent cache...")
+        base_passages_train = self._load_cached_evidence(train_claims, self.cached_train_path, "Train Cache")
+        
+        if self.augmentation_method != "none":
+            passages_train = base_passages_train + base_passages_train
+        else:
+            passages_train = base_passages_train
+            
+        passages_val = self._load_cached_evidence(val_claims, self.cached_val_path, "Val Cache")
+
+        if verbose:
+            print("[4/4] Encoding features...")
         X_train = self._featurize(aug_claims, passages_train, "Encode train")
-        if verbose:
-            n_with_ev = sum(bool(p) for p in passages_train)
-            print(f"       {n_with_ev}/{len(aug_claims)} train samples have evidence after filtering")
-        if verbose:
-            print("[5/5] Encoding val features...")
         X_val = self._featurize(val_claims, passages_val, "Encode val")
 
         y_train = np.array(aug_labels)
         y_val = np.array(val_labels)
 
-        # Train classifier
         if verbose:
             print("\nTraining MLP classifier...")
-        history = self.trainer.fit(
+        return self.trainer.fit(
             X_train, y_train, X_val, y_val,
             epochs=epochs, batch_size=batch_size,
             patience=patience, verbose=verbose,
         )
-        return history
 
-    def predict(self, claims: list[str], retrieve_evidence: bool = True) -> np.ndarray:
-        """
-        Inference trên list of claims.
-
-        Returns:
-            numpy array of binary predictions (0=FAKE, 1=REAL).
-        """
-        k_list = self.scorer.batch_compute_k(claims)
-
-        if retrieve_evidence:
-            passages_list = self._retrieve_all(claims, k_list, "Inference retrieve")
+    def predict(self, claims: list[str], cached_test_path: str | Path | None = None) -> np.ndarray:
+        """Inference using local test cache."""
+        if cached_test_path:
+            passages_list = self._load_cached_evidence(claims, cached_test_path, "Test Cache")
         else:
+            print("[Inference] WARNING: No cache path provided. Running zero-evidence ablation mode.")
             passages_list = [[] for _ in claims]
 
         X = self._featurize(claims, passages_list, "Inference encode")
         return self.trainer.predict(X)
 
     def save(self, save_dir: str | Path) -> None:
-        """Lưu classifier weights."""
         save_dir = Path(save_dir)
         save_dir.mkdir(parents=True, exist_ok=True)
         self.trainer.save(save_dir / "arpd_classifier.pt")
 
     def load(self, save_dir: str | Path) -> None:
-        """Load classifier weights."""
         self.trainer.load(Path(save_dir) / "arpd_classifier.pt")
 
-
 if __name__ == "__main__":
-    # Smoke test với dummy data (không retrieve để nhanh)
-    claims_train = ["Obama signed a bill.", "Vaccines cause autism."] * 50
-    labels_train = [1, 0] * 50
-    claims_val = ["New tax reform passed.", "Moon landing was faked."] * 10
-    labels_val = [1, 0] * 10
+    # Smoke test với dummy data sử dụng file tạm
+    import pandas as pd
+    
+    # Tạo dummy cache files để không bị lỗi FileNotFoundError
+    mock_df = pd.DataFrame({"claim": ["Obama signed a bill.", "Vaccines cause autism."], "evidence": ["['Evidence 1']", "['Evidence 2']"]})
+    mock_df.to_csv("mock_train.csv", index=False)
+    mock_df.to_csv("mock_val.csv", index=False)
 
-    pipeline = ARPDPipeline(augmentation_method="synonym")
+    claims_train = ["Obama signed a bill.", "Vaccines cause autism."]
+    labels_train = [1, 0]
+    claims_val = ["Obama signed a bill.", "Vaccines cause autism."]
+    labels_val = [1, 0]
+
+    pipeline = ARPDPipeline(
+        augmentation_method="synonym",
+        cached_train_path="mock_train.csv",
+        cached_val_path="mock_val.csv"
+    )
     history = pipeline.fit(
         claims_train, labels_train,
         claims_val, labels_val,
-        epochs=3, retrieve_evidence=False, verbose=True,
+        epochs=1, verbose=True
     )
-    preds = pipeline.predict(["The president raised taxes."], retrieve_evidence=False)
-    print(f"\nPrediction: {'REAL' if preds[0] == 1 else 'FAKE'}")
+    
+    # Test zero-evidence mode prediction
+    preds = pipeline.predict(["The president raised taxes."])
+    print(f"\nPrediction (Zero-Ev): {'REAL' if preds[0] == 1 else 'FAKE'}")
+    
+    # Clean up mock files
+    import os
+    os.remove("mock_train.csv")
+    os.remove("mock_val.csv")
