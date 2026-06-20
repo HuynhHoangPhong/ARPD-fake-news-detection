@@ -57,8 +57,14 @@ class ARPDPipeline:
         print(f"[{desc}] Reading cache from {cache_path}...")
         df = pd.read_csv(cache_path)
         
-        df['evidence'] = df['evidence'].apply(lambda x: ast.literal_eval(x) if isinstance(x, str) else [])
-        cache_dict = dict(zip(df['claim'], df['evidence']))
+        # Parse the custom ' [SEP] ' delimited format your extraction script used
+        def parse_evidence(text):
+            if not isinstance(text, str) or not text.strip():
+                return []
+            return text.split(" [SEP] ")
+            
+        df['retrieved_evidence'] = df['retrieved_evidence'].apply(parse_evidence)
+        cache_dict = dict(zip(df['claim'], df['retrieved_evidence']))
         
         return [cache_dict.get(claim, []) for claim in claims]
 
