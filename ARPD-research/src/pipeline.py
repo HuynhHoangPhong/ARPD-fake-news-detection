@@ -97,16 +97,25 @@ class ARPDPipeline:
                 p_synonym=self.p_synonym,
             )
 
+        # Bước 3/4: Load Cache or Fallback to Zero-Evidence
         if verbose:
-            print("[3/4] Loading evidence from persistent cache...")
-        base_passages_train = self._load_cached_evidence(train_claims, self.cached_train_path, "Train Cache")
-        
-        if self.augmentation_method != "none":
-            passages_train = base_passages_train + base_passages_train
-        else:
-            passages_train = base_passages_train
+            print("[3/4] Processing evidence configuration...")
             
-        passages_val = self._load_cached_evidence(val_claims, self.cached_val_path, "Val Cache")
+        if self.cached_train_path is not None:
+            base_passages_train = self._load_cached_evidence(train_claims, self.cached_train_path, "Train Cache")
+            if self.augmentation_method != "none":
+                passages_train = base_passages_train + base_passages_train
+            else:
+                passages_train = base_passages_train
+        else:
+            if verbose:
+                print("       [Ablation] Omitted training cache path. Using empty arrays (Zero-Evidence).")
+            passages_train = [[] for _ in aug_claims]
+            
+        if self.cached_val_path is not None:
+            passages_val = self._load_cached_evidence(val_claims, self.cached_val_path, "Val Cache")
+        else:
+            passages_val = [[] for _ in val_claims]
 
         if verbose:
             print("[4/4] Encoding features...")
