@@ -1,0 +1,2 @@
+model,test_acc,test_f1,retrieve
+ARPD,0.6250986582478295,0.619327709299391,True

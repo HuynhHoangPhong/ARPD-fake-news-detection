@@ -19,6 +19,7 @@ import numpy as np
 import wikipediaapi
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
+import requests
 
 
 def _extract_keywords(claim: str, top_n: int = 5) -> str:
@@ -101,49 +102,70 @@ class AdaptiveRetriever:
         sims = cosine_similarity(claim_emb, passage_embs)[0]    # (P,)
         return [p for p, s in zip(passages, sims) if s >= self.sim_threshold]
 
-    def _fetch_passages(self, query: str) -> list[str]:
-        """Fetch Wikipedia summary và chunk thành passages."""
-        if query in self._cache:
-            return self._cache[query]
+    def _fetch_passages(self, query: str, srlimit: int = 5) -> list[str]:
+        """
+        Uses Wikipedia's Search API to find valid page titles matching the query,
+        then extracts and chunks summaries dynamically based on srlimit.
+        """
+        import requests
+        
+        if not query.strip():
+            return []
+
+        # 1. Search Wikipedia for the closest matching page titles
+        search_url = "https://en.wikipedia.org/w/api.php"
+        search_params = {
+            "action": "query",
+            "list": "search",
+            "srsearch": query,
+            "format": "json",
+            "utf8": 1,
+            "srlimit": srlimit  # Dynamically fetch exactly how many articles the scorer requested
+        }
 
         try:
-            page = self.wiki.page(query)
-            if not page.exists():
-                # Thử lại với query ngắn hơn (lấy từ đầu)
-                short_query = " ".join(query.split()[:3])
-                page = self.wiki.page(short_query)
+            response = requests.get(search_url, params=search_params, timeout=5)
+            data = response.json()
+            search_results = data.get("query", {}).get("search", [])
+        except Exception as e:
+            print(f"Search API request failed for query '{query}': {e}")
+            return []
 
+        if not search_results:
+            return []
+
+        # 2. Extract summaries from the valid page titles discovered
+        all_passages = []
+        for item in search_results:
+            valid_title = item["title"]
+            page = self.wiki.page(valid_title)
+            
             if page.exists():
-                passages = _chunk_text(page.summary, self.chunk_size)
-            else:
-                passages = []
-        except Exception:
-            passages = []
+                text = page.summary
+                # Chunk the raw summary into uniform windows
+                chunks = _chunk_text(text, chunk_size=100)
+                all_passages.extend(chunks)
+                
+            time.sleep(self.sleep_between)  # Respect API rate limits to prevent throttling
 
-        time.sleep(self.sleep_between)
-        self._cache[query] = passages
-        return passages
+        return all_passages
 
     def retrieve(self, claim: str, k: int) -> list[str]:
         """
-        Lấy tối đa k evidence passages từ Wikipedia cho claim,
-        sau đó lọc bỏ passages không liên quan (sim < threshold).
-
-        Args:
-            claim: Câu cần kiểm tra.
-            k: Số passages cần lấy (từ k_adaptive).
-
-        Returns:
-            List passages đã lọc, tối đa k phần tử.
-            Trả về [] nếu không có passage nào vượt ngưỡng similarity.
+        Main entry point for evidence retrieval.
+        Extracts keywords, executes dynamic Wikipedia search, and filters by semantic similarity.
         """
+        # Extract up to 5 focused keywords from the claim text
         query = _extract_keywords(claim, top_n=5)
-        passages = self._fetch_passages(query)
+        
+        # Pass k directly to match the Uncertainty Scorer's target capacity
+        passages = self._fetch_passages(query, srlimit=k)
 
+        # Fallback to the raw claim snippet if the keyword extraction returned a dead end
         if not passages:
-            passages = self._fetch_passages(claim[:100])
+            passages = self._fetch_passages(claim[:100], srlimit=k)
 
-        # Lọc theo cosine similarity trước khi cắt top-k
+        # Rerank and filter the extracted chunks based on similarity to the original claim
         filtered = self._filter_by_similarity(claim, passages)
         return filtered[:k]
 
