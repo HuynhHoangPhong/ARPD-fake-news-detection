@@ -1,7 +1,9 @@
 """
 Baselines:
   1. TF-IDF + Logistic Regression (không dùng evidence)
-  2. DistilBERT fine-tuned (không dùng evidence, không augmentation)
+  2. Frozen all-distilroberta-v1 encoder + trained MLP head
+     (NOTE: this is NOT DistilBERT fine-tuned end-to-end.
+      The encoder weights are frozen; only the MLP classifier is trained.)
 
 Kết quả lưu vào results/baseline_results.csv
 """
@@ -39,17 +41,27 @@ def load_or_download() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     return splits["train"], splits["validation"], splits["test"]
 
 
+def _add_speaker_context(df: pd.DataFrame) -> list[str]:
+    """Format "[speaker] [subject] claim" for TF-IDF input (mirrors ARPD encoder)."""
+    return [
+        f"[{(row.get('speaker', '') or '').strip() or 'unknown'}] "
+        f"[{(row.get('subject', '') or '').strip() or 'unknown'}] "
+        f"{row['claim']}"
+        for _, row in df.iterrows()
+    ]
+
+
 def run_tfidf_lr(
     train: pd.DataFrame, val: pd.DataFrame, test: pd.DataFrame
 ) -> dict:
-    """TF-IDF + Logistic Regression baseline."""
-    print("\n--- Baseline 1: TF-IDF + Logistic Regression ---")
-    vec = TfidfVectorizer(max_features=50_000, ngram_range=(1, 2), sublinear_tf=True)
-    X_train = vec.fit_transform(train["claim"])
-    X_val = vec.transform(val["claim"])
-    X_test = vec.transform(test["claim"])
+    """TF-IDF + Logistic Regression baseline (with speaker-context features)."""
+    print("\n--- Baseline 1: TF-IDF + LR (speaker-context features) ---")
+    vec = TfidfVectorizer(max_features=15000, ngram_range=(1, 3), C=0.5)
+    X_train = vec.fit_transform(_add_speaker_context(train))
+    X_val = vec.transform(_add_speaker_context(val))
+    X_test = vec.transform(_add_speaker_context(test))
 
-    clf = LogisticRegression(max_iter=1000, C=1.0, class_weight="balanced")
+    clf = LogisticRegression(max_iter=1000, C=0.5, random_state=42)
     clf.fit(X_train, train["label"])
 
     results = {}
@@ -68,18 +80,20 @@ def run_distilbert(
     epochs: int = 3, batch_size: int = 32,
 ) -> dict:
     """
-    DistilBERT fine-tuned baseline.
-    Dùng sentence-transformers encode rồi train MLP (để đơn giản và nhanh).
-    DistilBERT: 66M params — trong giới hạn 125M.
+    Frozen all-distilroberta-v1 encoder + trained MLP classifier.
+
+    This is NOT DistilBERT fine-tuned end-to-end. The sentence encoder
+    (all-distilroberta-v1, ~82M params) is used purely for feature extraction
+    with frozen weights; only the downstream MLP (~190K params) is trained.
     """
-    print("\n--- Baseline 2: DistilBERT + MLP ---")
+    print("\n--- Baseline 2: Frozen DistilRoBERTa encoder + trained MLP ---")
     from sentence_transformers import SentenceTransformer
     from src.classifier import ARPDTrainer
 
     model = SentenceTransformer("sentence-transformers/all-distilroberta-v1")
 
     def encode(df: pd.DataFrame) -> np.ndarray:
-        return model.encode(df["claim"].tolist(), show_progress_bar=True, batch_size=batch_size)
+        return model.encode(_add_speaker_context(df), show_progress_bar=True, batch_size=batch_size)
 
     print("  Encoding train...")
     X_train = encode(train)
@@ -95,7 +109,7 @@ def run_distilbert(
         epochs=epochs, verbose=True,
     )
 
-    results = {"model": "DistilBERT+MLP"}
+    results = {"model": "FrozenDistilRoBERTa+MLP"}
     for split_name, X, y in [("val", X_val, val["label"].values), ("test", X_test, test["label"].values)]:
         metrics = trainer.evaluate(X, y)
         results[f"{split_name}_acc"] = metrics["accuracy"]

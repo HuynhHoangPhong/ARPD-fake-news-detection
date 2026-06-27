@@ -287,6 +287,24 @@ class ARPDTrainer:
                 )
         return np.array(preds)
 
+    def predict_proba(self, X: np.ndarray, batch_size: int = 256) -> np.ndarray:
+        """Return class probabilities (N, 2) via softmax over logits."""
+        self.model.eval()
+        probs = []
+        with torch.no_grad():
+            for (X_batch,) in DataLoader(
+                TensorDataset(torch.tensor(X, dtype=torch.float32)),
+                batch_size=batch_size,
+            ):
+                logits = self.model(X_batch.to(self.device))
+                if self.use_improved:
+                    p = torch.softmax(logits, dim=-1).cpu().numpy()
+                else:
+                    s = torch.sigmoid(logits).cpu().numpy()
+                    p = np.stack([1 - s, s], axis=1)
+                probs.append(p)
+        return np.vstack(probs)  # (N, 2)
+
     def save(self, path: str | Path) -> None:
         Path(path).parent.mkdir(parents=True, exist_ok=True)
         torch.save(self.model.state_dict(), path)

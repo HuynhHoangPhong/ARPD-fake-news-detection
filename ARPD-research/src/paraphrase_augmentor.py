@@ -23,6 +23,27 @@ from nltk.corpus import wordnet
 # Lazy-load để tránh import transformer lúc không cần thiết
 _bt_models: dict | None = None
 
+# WordNet POS tag → NLTK POS constant mapping
+_POS_MAP = {
+    "NN": wordnet.NOUN, "NNS": wordnet.NOUN, "NNP": wordnet.NOUN, "NNPS": wordnet.NOUN,
+    "VB": wordnet.VERB, "VBD": wordnet.VERB, "VBG": wordnet.VERB,
+    "VBN": wordnet.VERB, "VBP": wordnet.VERB, "VBZ": wordnet.VERB,
+    "JJ": wordnet.ADJ, "JJR": wordnet.ADJ, "JJS": wordnet.ADJ,
+    "RB": wordnet.ADV, "RBR": wordnet.ADV, "RBS": wordnet.ADV,
+}
+
+# Blocklist: lemmas that are slang, vulgar, or domain-inappropriate
+_SYNONYM_BLOCKLIST = {
+    "fuck", "shit", "ass", "bastard", "crap", "damn", "hell",
+    "piss", "whore", "bitch", "cock", "dick", "pussy", "cunt",
+    "homo", "retard", "moron", "idiot",
+    # Degenerate substitutions observed on political LIAR claims
+    "ampere",   # "major" → "ampere" via electrical engineering synset
+    "neb",      # "bill" → "neb" (archaic beak meaning)
+    "pecker",   # "bill" → "pecker" (vulgar)
+    "billhook",
+}
+
 
 def _load_bt_models() -> dict:
     """Load back-translation models lần đầu tiên dùng."""
@@ -83,6 +104,9 @@ def synonym_substitute(text: str, p: float = 0.15, seed: int | None = None) -> s
     """
     Thay thế ngẫu nhiên ~p% từ bằng synonym từ WordNet.
 
+    Uses POS-tagging to restrict substitutions to the same part of speech,
+    and filters out a blocklist of slang/vulgar/degenerate lemmas.
+
     Args:
         text: Câu gốc.
         p: Xác suất thay thế mỗi từ.
@@ -93,21 +117,30 @@ def synonym_substitute(text: str, p: float = 0.15, seed: int | None = None) -> s
     """
     rng = random.Random(seed)
     words = text.split()
-    result = []
 
-    for word in words:
-        # Chỉ substitute nếu roll thành công VÀ có synonym
+    # POS-tag for same-POS constraint; fall back gracefully if unavailable
+    try:
+        pos_tags = nltk.pos_tag(words)
+    except Exception:
+        pos_tags = [(w, "NN") for w in words]  # default to noun if tagger fails
+
+    result = []
+    for word, pos in pos_tags:
         if rng.random() < p:
-            syns = wordnet.synsets(word.lower())
-            lemmas = [
-                lem.name().replace("_", " ")
-                for syn in syns
-                for lem in syn.lemmas()
-                if lem.name().lower() != word.lower()
-            ]
-            if lemmas:
-                result.append(rng.choice(lemmas))
-                continue
+            wn_pos = _POS_MAP.get(pos)  # None if not a content POS
+            if wn_pos is not None:
+                syns = wordnet.synsets(word.lower(), pos=wn_pos)
+                lemmas = [
+                    lem.name().replace("_", " ")
+                    for syn in syns
+                    for lem in syn.lemmas()
+                    if (lem.name().lower() != word.lower()
+                        and lem.name().lower() not in _SYNONYM_BLOCKLIST
+                        and "_" not in lem.name())  # skip multi-word phrases
+                ]
+                if lemmas:
+                    result.append(rng.choice(lemmas))
+                    continue
         result.append(word)
 
     return " ".join(result)
@@ -249,10 +282,11 @@ def combined_augment(
 
 
 def ensure_nltk_data() -> None:
-    """Download WordNet nếu chưa có."""
-    for resource in ["wordnet", "omw-1.4"]:
+    """Download WordNet and POS tagger data if not present."""
+    for resource, kind in [("wordnet", "corpora"), ("omw-1.4", "corpora"),
+                           ("averaged_perceptron_tagger_eng", "taggers")]:
         try:
-            nltk.data.find(f"corpora/{resource}")
+            nltk.data.find(f"{kind}/{resource}")
         except LookupError:
             nltk.download(resource, quiet=True)
 

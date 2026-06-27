@@ -56,7 +56,7 @@ def evaluate_robustness(
     test_claims: list[str],
     test_labels: list[int],
     attack_methods: list[str] | None = None,
-    retrieve: bool = False,  # Tắt retrieval để evaluate nhanh
+    cached_test_path=None,
 ) -> pd.DataFrame:
     """
     Đánh giá pipeline trên clean + adversarial test set.
@@ -68,7 +68,7 @@ def evaluate_robustness(
         attack_methods = ["synonym_p15", "synonym_p30", "synonym_p50"]
 
     # Clean accuracy
-    clean_preds = pipeline.predict(test_claims, retrieve_evidence=retrieve)
+    clean_preds = pipeline.predict(test_claims, cached_test_path=cached_test_path)
     clean_acc = accuracy_score(test_labels, clean_preds)
     clean_f1 = f1_score(test_labels, clean_preds, average="macro")
     print(f"  Clean: acc={clean_acc:.4f} f1={clean_f1:.4f}")
@@ -86,7 +86,7 @@ def evaluate_robustness(
         else:
             continue
 
-        adv_preds = pipeline.predict(adv_claims, retrieve_evidence=retrieve)
+        adv_preds = pipeline.predict(adv_claims, cached_test_path=None)  # adversarial: zero-evidence
         adv_acc = accuracy_score(test_labels, adv_preds)
         adv_f1 = f1_score(test_labels, adv_preds, average="macro")
         drop = clean_acc - adv_acc
@@ -95,6 +95,9 @@ def evaluate_robustness(
         rows.append({"attack": method, "accuracy": adv_acc, "f1_macro": adv_f1, "robustness_drop": drop})
 
     return pd.DataFrame(rows)
+
+
+CACHE_DIR = Path(__file__).parent.parent
 
 
 def main(retrieve: bool = False):
@@ -108,6 +111,8 @@ def main(retrieve: bool = False):
     test = pd.read_csv(test_path)
     test_claims = test["claim"].tolist()
     test_labels = test["label"].tolist()
+
+    test_cache = CACHE_DIR / "cached_test_evidence.csv" if retrieve else None
 
     # Load trained pipeline
     print("Loading ARPD pipeline...")
@@ -129,7 +134,7 @@ def main(retrieve: bool = False):
     df_rob = evaluate_robustness(
         pipeline, test_claims, test_labels,
         attack_methods=["synonym_p15", "synonym_p30", "synonym_p50"],
-        retrieve=retrieve,
+        cached_test_path=test_cache,
     )
 
     out_path = RESULTS_DIR / "robustness_results.csv"

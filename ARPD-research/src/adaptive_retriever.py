@@ -69,9 +69,10 @@ class AdaptiveRetriever:
             encoder: SentenceTransformer instance (hoặc None để lazy-load MiniLM).
         """
         self.wiki = wikipediaapi.Wikipedia(
-            language=language,
             user_agent="ARPD-Research/1.0 (phong.huynhhoang.work@gmail.com)",
+            language=language,
         )
+        self._ua_headers = {"User-Agent": "ARPD-Research/1.0 (phong.huynhhoang.work@gmail.com)"}
         self.chunk_size = chunk_size
         self.sleep_between = sleep_between
         self.sim_threshold = sim_threshold
@@ -124,7 +125,7 @@ class AdaptiveRetriever:
         }
 
         try:
-            response = requests.get(search_url, params=search_params, timeout=5)
+            response = requests.get(search_url, params=search_params, headers=self._ua_headers, timeout=5)
             data = response.json()
             search_results = data.get("query", {}).get("search", [])
         except Exception as e:
@@ -150,22 +151,25 @@ class AdaptiveRetriever:
 
         return all_passages
 
+    # Over-fetch candidate articles before similarity filtering.
+    # Diagnosis showed that fetching only k articles gives too few chunks to
+    # filter down to k high-quality passages; 10 gives a good candidate pool.
+    _CANDIDATE_SRLIMIT = 10
+
     def retrieve(self, claim: str, k: int) -> list[str]:
         """
         Main entry point for evidence retrieval.
         Extracts keywords, executes dynamic Wikipedia search, and filters by semantic similarity.
         """
-        # Extract up to 5 focused keywords from the claim text
         query = _extract_keywords(claim, top_n=5)
-        
-        # Pass k directly to match the Uncertainty Scorer's target capacity
-        passages = self._fetch_passages(query, srlimit=k)
 
-        # Fallback to the raw claim snippet if the keyword extraction returned a dead end
+        # Over-fetch candidates; similarity filter then narrows to k
+        passages = self._fetch_passages(query, srlimit=self._CANDIDATE_SRLIMIT)
+
+        # Fallback to the raw claim if TF-IDF keyword extraction returned a dead end
         if not passages:
-            passages = self._fetch_passages(claim[:100], srlimit=k)
+            passages = self._fetch_passages(claim[:100], srlimit=self._CANDIDATE_SRLIMIT)
 
-        # Rerank and filter the extracted chunks based on similarity to the original claim
         filtered = self._filter_by_similarity(claim, passages)
         return filtered[:k]
 

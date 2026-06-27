@@ -109,6 +109,10 @@ def load_liar(split: str = "train", cache_dir: str | None = None) -> pd.DataFram
     df_raw["claim"] = df_raw["claim"].astype(str).str.strip()
     df_raw = df_raw.dropna(subset=["claim"]).reset_index(drop=True)
 
+    # Fill NaN in speaker/subject so callers can safely format strings
+    df_raw["speaker"] = df_raw["speaker"].fillna("").astype(str).str.strip()
+    df_raw["subject"] = df_raw["subject"].fillna("").astype(str).str.strip()
+
     return df_raw[["claim", "speaker", "subject", "label", "label_str"]]
 
 
