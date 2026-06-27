@@ -14,8 +14,11 @@ Wikipedia summaries. In a 20-claim validation sample after the fix, 6/20
 are typically hyper-local political claims (e.g. county-level tax or spending
 claims) for which Wikipedia has no dedicated article.
 
-**Expected full-dataset fill rate:** ~70–80% of claims will get at least one
-evidence passage; ~20–30% will remain zero-evidence and fall back to
+**Measured fill rate (20-claim stress test, random_state=42, liar_train):** 65%
+(13/20 claims received ≥1 passage). The 7 failures were all hyper-local claims
+(county-level spending/politician-specific) for which Wikipedia has no article.
+Prior estimate of 70–80% is plausible for a larger sample; 65% is a conservative
+lower bound from this 20-claim probe. Zero-evidence claims fall back to
 claim-only encoding. This is a meaningful limitation because zero-evidence
 claims effectively reduce ARPD to the no-retrieval baseline for that subset.
 

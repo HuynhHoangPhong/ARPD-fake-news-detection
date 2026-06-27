@@ -14,8 +14,10 @@ Each CSV has columns:
 Usage:
     python build_evidence_cache.py [--splits train val test] [--sleep 0.5]
 
-This will take ~2-3 hours for the full train split (~10K claims) at 0.5s/article.
-Run on a machine with internet access (Colab recommended for speed).
+Timing estimates (measured on LIAR train, varies with network):
+  --sleep 0.5 (default, polite): ~10-15h on Colab T4, ~40-48h on local machine.
+  --sleep 0.1 (faster, may hit rate limits): ~3-5h on Colab T4.
+Run on Colab with --sleep 0.1 for best speed; resume is safe (checkpoints every 50 claims).
 """
 
 import sys
@@ -79,8 +81,9 @@ def build_cache(split: str, sleep_between: float = 0.5, resume: bool = True) -> 
         evidence_str = " [SEP] ".join(passages) if passages else ""
         rows.append({"claim": claim, "k_used": k, "retrieved_evidence": evidence_str})
 
-        # Checkpoint every 500 claims so progress is not lost on interruption
-        if len(rows) % 500 == 0:
+        # Checkpoint every 50 claims so at most ~3-4 min of work is lost on interruption.
+        # (500 was too coarse: at 4s/claim that's 33 min to first save.)
+        if len(rows) % 50 == 0:
             pd.DataFrame(rows).to_csv(out_path, index=False)
 
     pd.DataFrame(rows).to_csv(out_path, index=False)
