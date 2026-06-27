@@ -390,3 +390,67 @@ class TestEndToEnd:
         preds_after = pipeline2.predict(self.CLAIMS)
 
         np.testing.assert_array_equal(preds_before, preds_after)
+
+    def test_pipeline_save_load_ensemble_state_restored(self, tmp_path):
+        """
+        Bug F regression: save() + load() must restore TF-IDF, LR, ensemble_weight,
+        and config flags.  Loading into a pipeline with WRONG constructor flags
+        must be overridden by the stored state.
+        """
+        from src.pipeline import ARPDPipeline
+
+        # Fit with ensemble enabled and speaker context on (defaults)
+        pipeline = ARPDPipeline(
+            device="cpu",
+            use_speaker_context=True,
+            use_ensemble=True,
+            grid_search_weight=True,
+        )
+        pipeline.fit(
+            self.CLAIMS * 20, self.LABELS * 20,
+            self.CLAIMS, self.LABELS,
+            train_speakers=self.SPEAKERS * 20,
+            train_subjects=self.SUBJECTS * 20,
+            val_speakers=self.SPEAKERS,
+            val_subjects=self.SUBJECTS,
+            epochs=2, verbose=False,
+        )
+        saved_weight = pipeline.ensemble_weight
+        preds_before = pipeline.predict(
+            self.CLAIMS, speakers=self.SPEAKERS, subjects=self.SUBJECTS
+        )
+        pipeline.save(tmp_path / "ckpt")
+
+        # Load into pipeline constructed with WRONG flags — load() must override them
+        pipeline2 = ARPDPipeline(
+            device="cpu",
+            use_speaker_context=False,   # wrong — should be overridden to True
+            use_ensemble=False,           # wrong — should be overridden to True
+        )
+        pipeline2.scorer.fit_reference([])
+        pipeline2.load(tmp_path / "ckpt")
+
+        # Flags restored from state
+        assert pipeline2.use_speaker_context is True, (
+            "use_speaker_context was not restored from pipeline_state.pkl"
+        )
+        assert pipeline2.use_ensemble is True, (
+            "use_ensemble was not restored from pipeline_state.pkl"
+        )
+        assert pipeline2.ensemble_weight == saved_weight, (
+            f"ensemble_weight mismatch: got {pipeline2.ensemble_weight}, "
+            f"expected {saved_weight}"
+        )
+        # LR must be fitted (has coef_ attribute)
+        assert hasattr(pipeline2.lr, "coef_"), (
+            "LogisticRegression was not restored (NotFittedError would occur on predict)"
+        )
+
+        # Predictions must be identical
+        preds_after = pipeline2.predict(
+            self.CLAIMS, speakers=self.SPEAKERS, subjects=self.SUBJECTS
+        )
+        np.testing.assert_array_equal(
+            preds_before, preds_after,
+            err_msg="Predictions differ after save/load — ensemble state not fully restored",
+        )

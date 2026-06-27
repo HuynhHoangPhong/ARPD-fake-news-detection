@@ -307,12 +307,69 @@ class ARPDPipeline:
         return self.trainer.predict(X)
 
     def save(self, save_dir: str | Path) -> None:
+        """
+        Save MLP weights AND ensemble state (TF-IDF, LR, weight, flags).
+
+        Bug F fix: previous version only saved the MLP, so loading a checkpoint
+        and calling predict() with use_ensemble=True would crash with
+        NotFittedError because self.tfidf / self.lr were never restored.
+        """
+        import pickle
+
         save_dir = Path(save_dir)
         save_dir.mkdir(parents=True, exist_ok=True)
+
         self.trainer.save(save_dir / "arpd_classifier.pt")
 
+        state = {
+            "use_speaker_context": self.use_speaker_context,
+            "use_ensemble":        self.use_ensemble,
+            "ensemble_weight":     self.ensemble_weight,
+            "tfidf":               self.tfidf,
+            "lr":                  self.lr,
+        }
+        with open(save_dir / "pipeline_state.pkl", "wb") as f:
+            pickle.dump(state, f)
+        print(f"Pipeline state saved -> {save_dir / 'pipeline_state.pkl'}")
+
     def load(self, save_dir: str | Path) -> None:
-        self.trainer.load(Path(save_dir) / "arpd_classifier.pt")
+        """
+        Load MLP weights AND ensemble state.
+
+        Bug F fix: load() now restores tfidf, lr, ensemble_weight, and config
+        flags from pipeline_state.pkl, overriding whatever was set in __init__.
+        This ensures the loaded pipeline behaves identically to the one that
+        was saved, regardless of how the loading constructor was called.
+        """
+        import pickle
+
+        save_dir = Path(save_dir)
+        self.trainer.load(save_dir / "arpd_classifier.pt")
+
+        state_path = save_dir / "pipeline_state.pkl"
+        if state_path.exists():
+            with open(state_path, "rb") as f:
+                state = pickle.load(f)
+            self.use_speaker_context = state["use_speaker_context"]
+            self.use_ensemble        = state["use_ensemble"]
+            self.ensemble_weight     = state["ensemble_weight"]
+            self.tfidf               = state["tfidf"]
+            self.lr                  = state["lr"]
+            # Keep encoder in sync with the restored flag
+            self.encoder.use_speaker_context = self.use_speaker_context
+            print(
+                f"Pipeline state loaded <- {state_path}  "
+                f"[use_speaker={self.use_speaker_context}, "
+                f"use_ensemble={self.use_ensemble}, "
+                f"w={self.ensemble_weight:.2f}]"
+            )
+        else:
+            print(
+                "WARNING: pipeline_state.pkl not found. "
+                "Ensemble components (TF-IDF, LR) are NOT restored. "
+                "If use_ensemble=True, predict() will raise NotFittedError. "
+                "Refit or re-save to generate pipeline_state.pkl."
+            )
 
 
 if __name__ == "__main__":
