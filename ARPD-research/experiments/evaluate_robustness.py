@@ -2,13 +2,19 @@
 Robustness Evaluation — đánh giá model dưới paraphrase attack.
 
 Protocol:
-  1. Load trained ARPD pipeline.
+  1. Load trained ARPD pipeline (checkpoint + pipeline_state.pkl).
   2. Tạo adversarial test set bằng synonym substitution trên test claims.
   3. So sánh accuracy trên clean vs. adversarial.
   4. Tính Robustness Drop = clean_acc - adversarial_acc.
   5. Lưu kết quả vào results/robustness_results.csv.
+
+Usage:
+  python experiments/evaluate_robustness.py              # zero-evidence, full ARPD config
+  python experiments/evaluate_robustness.py --retrieve   # use test cache
+  python experiments/evaluate_robustness.py --no-speaker --no-ensemble  # ablation config
 """
 
+import argparse
 import sys
 from pathlib import Path
 
@@ -25,6 +31,7 @@ from src.pipeline import ARPDPipeline
 
 RESULTS_DIR = Path(__file__).parent.parent / "results"
 DATA_DIR = Path(__file__).parent.parent / "data" / "processed"
+CACHE_DIR = Path(__file__).parent.parent
 
 
 def create_adversarial(
@@ -45,7 +52,7 @@ def create_adversarial(
             try:
                 adv.append(back_translate(c))
             except Exception:
-                adv.append(c)  # fallback nếu model chưa download
+                adv.append(c)
         else:
             adv.append(c)
     return adv
@@ -55,22 +62,33 @@ def evaluate_robustness(
     pipeline: ARPDPipeline,
     test_claims: list[str],
     test_labels: list[int],
+    test_speakers: list[str] | None = None,
+    test_subjects: list[str] | None = None,
     attack_methods: list[str] | None = None,
-    retrieve: bool = False,  # Tắt retrieval để evaluate nhanh
+    cached_test_path=None,
 ) -> pd.DataFrame:
     """
     Đánh giá pipeline trên clean + adversarial test set.
 
+    Bug E fix: speakers/subjects are passed to every pipeline.predict() call.
+    For adversarial claims, speaker/subject metadata stays the same — only the
+    claim text is perturbed; the speaker identity does not change.
+
     Returns:
-        DataFrame với cột: attack_method, accuracy, f1_macro, robustness_drop
+        DataFrame với cột: attack, accuracy, f1_macro, robustness_drop
     """
     if attack_methods is None:
         attack_methods = ["synonym_p15", "synonym_p30", "synonym_p50"]
 
-    # Clean accuracy
-    clean_preds = pipeline.predict(test_claims, retrieve_evidence=retrieve)
+    # Clean accuracy — pass speakers/subjects so encoder uses same context as training
+    clean_preds = pipeline.predict(
+        test_claims,
+        speakers=test_speakers,
+        subjects=test_subjects,
+        cached_test_path=cached_test_path,
+    )
     clean_acc = accuracy_score(test_labels, clean_preds)
-    clean_f1 = f1_score(test_labels, clean_preds, average="macro")
+    clean_f1  = f1_score(test_labels, clean_preds, average="macro")
     print(f"  Clean: acc={clean_acc:.4f} f1={clean_f1:.4f}")
 
     rows = [{"attack": "clean", "accuracy": clean_acc, "f1_macro": clean_f1, "robustness_drop": 0.0}]
@@ -86,10 +104,18 @@ def evaluate_robustness(
         else:
             continue
 
-        adv_preds = pipeline.predict(adv_claims, retrieve_evidence=retrieve)
+        # Adversarial: zero-evidence (cache is for original claims only).
+        # Speaker/subject metadata is unchanged — the identity of who said the
+        # claim does not change when we paraphrase the claim text.
+        adv_preds = pipeline.predict(
+            adv_claims,
+            speakers=test_speakers,
+            subjects=test_subjects,
+            cached_test_path=None,
+        )
         adv_acc = accuracy_score(test_labels, adv_preds)
-        adv_f1 = f1_score(test_labels, adv_preds, average="macro")
-        drop = clean_acc - adv_acc
+        adv_f1  = f1_score(test_labels, adv_preds, average="macro")
+        drop    = clean_acc - adv_acc
 
         print(f"  {method}: acc={adv_acc:.4f} f1={adv_f1:.4f} drop={drop:+.4f}")
         rows.append({"attack": method, "accuracy": adv_acc, "f1_macro": adv_f1, "robustness_drop": drop})
@@ -97,7 +123,11 @@ def evaluate_robustness(
     return pd.DataFrame(rows)
 
 
-def main(retrieve: bool = False):
+def main(
+    retrieve: bool = False,
+    use_speaker: bool = True,
+    use_ensemble: bool = True,
+) -> None:
     RESULTS_DIR.mkdir(exist_ok=True)
 
     test_path = DATA_DIR / "liar_test.csv"
@@ -109,9 +139,23 @@ def main(retrieve: bool = False):
     test_claims = test["claim"].tolist()
     test_labels = test["label"].tolist()
 
-    # Load trained pipeline
-    print("Loading ARPD pipeline...")
-    pipeline = ARPDPipeline()
+    # Bug E fix: read speakers/subjects from test set so pipeline.predict() gets
+    # the same context the model was trained with.
+    test_speakers = test["speaker"].fillna("").tolist() if use_speaker else None
+    test_subjects = test["subject"].fillna("").tolist() if use_speaker else None
+
+    test_cache = CACHE_DIR / "cached_test_evidence.csv" if retrieve else None
+
+    # Bug E fix: initialise pipeline with the flags that match the checkpoint.
+    # If the checkpoint was trained with --no-speaker, pass use_speaker_context=False.
+    print(
+        f"Loading ARPD pipeline "
+        f"[use_speaker={use_speaker}, use_ensemble={use_ensemble}]..."
+    )
+    pipeline = ARPDPipeline(
+        use_speaker_context=use_speaker,
+        use_ensemble=use_ensemble,
+    )
 
     ckpt_dir = RESULTS_DIR / "checkpoints"
     if (ckpt_dir / "arpd_classifier.pt").exists():
@@ -120,29 +164,37 @@ def main(retrieve: bool = False):
         print("WARNING: No checkpoint found. Fit pipeline first via run_arpd.py")
         return
 
-    # Cần fit_reference cho scorer
     train = pd.read_csv(DATA_DIR / "liar_train.csv")
     print("Fitting uncertainty scorer reference...")
     pipeline.scorer.fit_reference(train["claim"].tolist())
 
     print("\nEvaluating robustness...")
     df_rob = evaluate_robustness(
-        pipeline, test_claims, test_labels,
+        pipeline,
+        test_claims,
+        test_labels,
+        test_speakers=test_speakers,
+        test_subjects=test_subjects,
         attack_methods=["synonym_p15", "synonym_p30", "synonym_p50"],
-        retrieve=retrieve,
+        cached_test_path=test_cache,
     )
 
     out_path = RESULTS_DIR / "robustness_results.csv"
     df_rob.to_csv(out_path, index=False)
-    print(f"\nResults saved → {out_path}")
+    print(f"\nResults saved -> {out_path}")
     print(df_rob.to_string(index=False))
 
 
 if __name__ == "__main__":
-    import argparse
-
     parser = argparse.ArgumentParser()
-    parser.add_argument("--retrieve", action="store_true",
-                        help="Use Wikipedia retrieval during evaluation")
+    parser.add_argument("--retrieve",    action="store_true")
+    parser.add_argument("--no-speaker",  action="store_true",
+                        help="Match checkpoint trained with --no-speaker flag")
+    parser.add_argument("--no-ensemble", action="store_true",
+                        help="Match checkpoint trained with --no-ensemble flag")
     args = parser.parse_args()
-    main(retrieve=args.retrieve)
+    main(
+        retrieve=args.retrieve,
+        use_speaker=not args.no_speaker,
+        use_ensemble=not args.no_ensemble,
+    )

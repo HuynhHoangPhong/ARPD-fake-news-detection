@@ -1,0 +1,42 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Data & models (large files)
+data/raw/*.zip
+data/raw/*.tsv
+*.pt
+*.bin
+*.ckpt
+
+# Cache files (rebuilding from scratch is preferred)
+cached_*_evidence.csv
+
+# Results (generated — do not commit individual run outputs)
+results/*.csv
+results/*.png
+results/*.json
+!results/.gitkeep
+!results/*_before_retrieval_fix.csv
+
+# Notebooks temp
+.ipynb_checkpoints/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Virtual envs
+venv/
+.env/

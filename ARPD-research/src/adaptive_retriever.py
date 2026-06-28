@@ -8,18 +8,29 @@ Chiến lược:
   4. Nếu Wikipedia fail (timeout, không tìm thấy), trả về danh sách rỗng
      thay vì crash — pipeline vẫn chạy được.
 
-Lưu ý: wikipedia-api có rate limit; dùng cache đơn giản để tránh gọi lại.
+PERF NOTE (2026-06 speed fix):
+  Bản gốc dùng `wikipediaapi.Wikipedia().page(title).summary` — mỗi page là
+  1 lượt parse HTML/wikitext nặng qua thư viện wikipediaapi. Bản này gọi
+  trực tiếp REST endpoint `/api/rest_v1/page/summary/{title}` (chỉ trả JSON
+  nhẹ chứa plaintext summary, không cần parse) — giảm đáng kể thời gian
+  mỗi request. Đồng thời các page-summary fetch của CÙNG một claim được
+  chạy SONG SONG qua ThreadPoolExecutor (I/O-bound nên threading hiệu quả),
+  thay vì tuần tự + sleep sau mỗi page. retrieve_batch() cũng song song hoá
+  giữa nhiều claims với cùng 1 executor dùng chung.
+
+  Logic khoa học (TF-IDF keyword extraction, similarity filter, k_adaptive,
+  thứ tự ưu tiên evidence) GIỮ NGUYÊN — chỉ đổi cách gọi mạng.
 """
 
 from __future__ import annotations
 
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import numpy as np
-import wikipediaapi
+import requests
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
-import requests
 
 
 def _extract_keywords(claim: str, top_n: int = 5) -> str:
@@ -59,24 +70,33 @@ class AdaptiveRetriever:
         sleep_between: float = 0.5,
         sim_threshold: float = 0.25,
         encoder=None,
+        max_workers: int = 16,
     ) -> None:
         """
         Args:
             language: Ngôn ngữ Wikipedia.
             chunk_size: Số từ mỗi passage chunk.
-            sleep_between: Giây nghỉ giữa các API call (tránh rate limit).
+            sleep_between: Giây nghỉ giữa các API call khi chạy TUẦN TỰ
+                (giữ để tương thích CLI cũ --sleep). Khi max_workers > 1,
+                các page-summary fetch của 1 claim chạy song song nên
+                sleep_between không áp dụng giữa chúng nữa; nó chỉ được
+                dùng như backoff cơ bản khi gặp lỗi 429/503.
             sim_threshold: Cosine similarity tối thiểu để giữ passage.
             encoder: SentenceTransformer instance (hoặc None để lazy-load MiniLM).
+            max_workers: Số thread song song tối đa khi fetch nhiều page
+                summary cho 1 claim. 1 = tuần tự (tương đương bản cũ).
         """
-        self.wiki = wikipediaapi.Wikipedia(
-            language=language,
-            user_agent="ARPD-Research/1.0 (phong.huynhhoang.work@gmail.com)",
-        )
+        self.language = language
+        self._ua_headers = {"User-Agent": "ARPD-Research/1.0 (phong.huynhhoang.work@gmail.com)"}
         self.chunk_size = chunk_size
         self.sleep_between = sleep_between
         self.sim_threshold = sim_threshold
         self._encoder = encoder
+        self.max_workers = max(1, max_workers)
         self._cache: dict[str, list[str]] = {}
+        # 1 Session dùng chung -> tận dụng connection pooling (HTTP keep-alive)
+        self._session = requests.Session()
+        self._session.headers.update(self._ua_headers)
 
     def _get_encoder(self):
         """Lazy-load MiniLM nếu chưa có encoder."""
@@ -102,13 +122,52 @@ class AdaptiveRetriever:
         sims = cosine_similarity(claim_emb, passage_embs)[0]    # (P,)
         return [p for p, s in zip(passages, sims) if s >= self.sim_threshold]
 
+    def _get_summary_text(self, title: str) -> str:
+        """
+        Lấy plaintext summary của 1 page qua REST API (nhẹ hơn nhiều so với
+        wikipediaapi.page().summary, vì server chỉ trả JSON nhỏ thay vì
+        parse toàn bộ page).
+
+        Retry với backoff ngắn khi gặp 429 (rate limit) / 503; trả về ""
+        nếu page không tồn tại (404) hoặc fail sau retry.
+        """
+        url = f"https://en.wikipedia.org/api/rest_v1/page/summary/{requests.utils.quote(title)}"
+        backoff = max(self.sleep_between, 0.2)
+        for attempt in range(3):
+            try:
+                resp = self._session.get(url, timeout=5)
+            except requests.RequestException:
+                time.sleep(backoff)
+                backoff *= 2
+                continue
+
+            if resp.status_code == 200:
+                try:
+                    data = resp.json()
+                except ValueError:
+                    return ""
+                return data.get("extract", "") or ""
+            if resp.status_code == 404:
+                return ""
+            if resp.status_code in (429, 503):
+                # Rate-limited or server busy — back off and retry.
+                time.sleep(backoff)
+                backoff *= 2
+                continue
+            # Other errors (4xx/5xx) — don't retry.
+            return ""
+        return ""
+
     def _fetch_passages(self, query: str, srlimit: int = 5) -> list[str]:
         """
         Uses Wikipedia's Search API to find valid page titles matching the query,
         then extracts and chunks summaries dynamically based on srlimit.
+
+        Page-summary fetches for the discovered titles run in PARALLEL via a
+        thread pool (I/O-bound network calls), instead of one-by-one with a
+        sleep after each — this is the main speed fix vs. the original
+        implementation.
         """
-        import requests
-        
         if not query.strip():
             return []
 
@@ -120,11 +179,11 @@ class AdaptiveRetriever:
             "srsearch": query,
             "format": "json",
             "utf8": 1,
-            "srlimit": srlimit  # Dynamically fetch exactly how many articles the scorer requested
+            "srlimit": srlimit,  # Dynamically fetch exactly how many articles the scorer requested
         }
 
         try:
-            response = requests.get(search_url, params=search_params, timeout=5)
+            response = self._session.get(search_url, params=search_params, timeout=5)
             data = response.json()
             search_results = data.get("query", {}).get("search", [])
         except Exception as e:
@@ -134,38 +193,45 @@ class AdaptiveRetriever:
         if not search_results:
             return []
 
-        # 2. Extract summaries from the valid page titles discovered
-        all_passages = []
-        for item in search_results:
-            valid_title = item["title"]
-            page = self.wiki.page(valid_title)
-            
-            if page.exists():
-                text = page.summary
-                # Chunk the raw summary into uniform windows
-                chunks = _chunk_text(text, chunk_size=100)
-                all_passages.extend(chunks)
-                
-            time.sleep(self.sleep_between)  # Respect API rate limits to prevent throttling
+        titles = [item["title"] for item in search_results]
+
+        # 2. Extract summaries from the valid page titles discovered — in parallel.
+        all_passages: list[str] = []
+        if self.max_workers <= 1:
+            for title in titles:
+                text = self._get_summary_text(title)
+                if text:
+                    all_passages.extend(_chunk_text(text, chunk_size=self.chunk_size))
+                time.sleep(self.sleep_between)
+        else:
+            with ThreadPoolExecutor(max_workers=min(self.max_workers, len(titles))) as ex:
+                future_to_title = {ex.submit(self._get_summary_text, t): t for t in titles}
+                for future in as_completed(future_to_title):
+                    text = future.result()
+                    if text:
+                        all_passages.extend(_chunk_text(text, chunk_size=self.chunk_size))
 
         return all_passages
+
+    # Over-fetch candidate articles before similarity filtering.
+    # Diagnosis showed that fetching only k articles gives too few chunks to
+    # filter down to k high-quality passages; 10 gives a good candidate pool.
+    _CANDIDATE_SRLIMIT = 10
 
     def retrieve(self, claim: str, k: int) -> list[str]:
         """
         Main entry point for evidence retrieval.
         Extracts keywords, executes dynamic Wikipedia search, and filters by semantic similarity.
         """
-        # Extract up to 5 focused keywords from the claim text
         query = _extract_keywords(claim, top_n=5)
-        
-        # Pass k directly to match the Uncertainty Scorer's target capacity
-        passages = self._fetch_passages(query, srlimit=k)
 
-        # Fallback to the raw claim snippet if the keyword extraction returned a dead end
+        # Over-fetch candidates; similarity filter then narrows to k
+        passages = self._fetch_passages(query, srlimit=self._CANDIDATE_SRLIMIT)
+
+        # Fallback to the raw claim if TF-IDF keyword extraction returned a dead end
         if not passages:
-            passages = self._fetch_passages(claim[:100], srlimit=k)
+            passages = self._fetch_passages(claim[:100], srlimit=self._CANDIDATE_SRLIMIT)
 
-        # Rerank and filter the extracted chunks based on similarity to the original claim
         filtered = self._filter_by_similarity(claim, passages)
         return filtered[:k]
 

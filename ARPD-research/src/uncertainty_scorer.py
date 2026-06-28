@@ -66,11 +66,12 @@ class UncertaintyScorer:
         k_max: int = 5,
         knn: int = 10,           # unused
         temperature: float = 0.1,  # unused
+        device=None,             # unused, kept for notebook compatibility
     ) -> None:
         self.k_min = k_min
         self.k_max = k_max
         # Kept to avoid breaking callers that pass these args
-        _ = model_name, knn, temperature
+        _ = model_name, knn, temperature, device
 
     def fit_reference(self, reference_claims: list[str]) -> None:
         """No-op -- linguistic scorer needs no reference set."""
@@ -136,6 +137,9 @@ class UncertaintyScorer:
 
     def batch_compute_k(self, claims: list[str]) -> list[int]:
         return [self.compute_k(c) for c in claims]
+
+    # Alias for notebook compatibility (older versions used predict_k)
+    predict_k = compute_k
 
 
 if __name__ == "__main__":
