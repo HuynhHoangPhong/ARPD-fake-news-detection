@@ -12,7 +12,7 @@ Each CSV has columns:
     retrieved_evidence — passages joined with ' [SEP] ' (empty string if none)
 
 Usage:
-    python build_evidence_cache.py [--splits train val test] [--sleep 0.5]
+    python build_evidence_cache.py [--splits train val test] [--sleep 0.5] [--max-claims N]
 
 Timing estimates (measured on LIAR train, varies with network):
   --sleep 0.5 (default, polite): ~10-15h on Colab T4, ~40-48h on local machine.
@@ -38,7 +38,7 @@ OUT_DIR = Path(__file__).parent  # cache files go in repo root
 
 
 def build_cache(split: str, sleep_between: float = 0.5, resume: bool = True,
-                 max_workers: int = 16) -> None:
+                 max_workers: int = 16, max_new_claims: int | None = None) -> None:
     split_file = DATA_DIR / f"liar_{split}.csv"
     if not split_file.exists():
         # Handle 'validation' vs 'val' naming
@@ -68,10 +68,16 @@ def build_cache(split: str, sleep_between: float = 0.5, resume: bool = True,
                                    max_workers=max_workers)
 
     rows = []
+    new_processed = 0
+    stopped_early = False
     for claim in tqdm(claims, desc=split):
         if claim in done:
             rows.append(done[claim])
             continue
+
+        if max_new_claims is not None and new_processed >= max_new_claims:
+            stopped_early = True
+            break
 
         k = scorer.compute_k(claim)
         try:
@@ -82,6 +88,7 @@ def build_cache(split: str, sleep_between: float = 0.5, resume: bool = True,
 
         evidence_str = " [SEP] ".join(passages) if passages else ""
         rows.append({"claim": claim, "k_used": k, "retrieved_evidence": evidence_str})
+        new_processed += 1
 
         # Checkpoint every 50 claims so at most ~3-4 min of work is lost on interruption.
         # (500 was too coarse: at 4s/claim that's 33 min to first save.)
@@ -89,6 +96,12 @@ def build_cache(split: str, sleep_between: float = 0.5, resume: bool = True,
             pd.DataFrame(rows).to_csv(out_path, index=False)
 
     pd.DataFrame(rows).to_csv(out_path, index=False)
+
+    if stopped_early:
+        remaining = len(claims) - len(rows)
+        print(f"[{split}] Đã xử lý {new_processed} claim mới trong lô này, dừng theo --max-claims. "
+              f"Còn {remaining} claim chưa xử lý — chạy lại cùng lệnh để tiếp tục (tự resume).")
+        return
 
     # Report fill rate
     result_df = pd.DataFrame(rows)
@@ -107,11 +120,15 @@ def main():
                              "(default 16). Đặt 1 để chạy tuần tự như bản gốc.")
     parser.add_argument("--no-resume", action="store_true",
                         help="Rebuild from scratch even if partial cache exists")
+    parser.add_argument("--max-claims", type=int, default=None,
+                        help="Max number of NEW claims to process in one run. Use to split "
+                             "work into small batches for safe sync/checkpoint on Colab. "
+                             "Re-run the same command to resume from where it stopped.")
     args = parser.parse_args()
 
     for split in args.splits:
         build_cache(split, sleep_between=args.sleep, resume=not args.no_resume,
-                    max_workers=args.max_workers)
+                    max_workers=args.max_workers, max_new_claims=args.max_claims)
 
 
 if __name__ == "__main__":
