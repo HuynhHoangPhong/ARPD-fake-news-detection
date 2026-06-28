@@ -37,7 +37,8 @@ DATA_DIR = Path(__file__).parent / "data" / "processed"
 OUT_DIR = Path(__file__).parent  # cache files go in repo root
 
 
-def build_cache(split: str, sleep_between: float = 0.5, resume: bool = True) -> None:
+def build_cache(split: str, sleep_between: float = 0.5, resume: bool = True,
+                 max_workers: int = 16) -> None:
     split_file = DATA_DIR / f"liar_{split}.csv"
     if not split_file.exists():
         # Handle 'validation' vs 'val' naming
@@ -63,7 +64,8 @@ def build_cache(split: str, sleep_between: float = 0.5, resume: bool = True) -> 
         print(f"[{split}] Resuming — {len(done)} already cached, {len(claims) - len(done)} remaining")
 
     scorer = UncertaintyScorer(k_min=1, k_max=5)
-    retriever = AdaptiveRetriever(sleep_between=sleep_between, sim_threshold=0.25)
+    retriever = AdaptiveRetriever(sleep_between=sleep_between, sim_threshold=0.25,
+                                   max_workers=max_workers)
 
     rows = []
     for claim in tqdm(claims, desc=split):
@@ -100,12 +102,16 @@ def main():
                         choices=["train", "val", "test"])
     parser.add_argument("--sleep", type=float, default=0.5,
                         help="Seconds between Wikipedia API calls (default 0.5)")
+    parser.add_argument("--max-workers", type=int, default=16,
+                        help="Số thread song song khi fetch page summaries cho 1 claim "
+                             "(default 16). Đặt 1 để chạy tuần tự như bản gốc.")
     parser.add_argument("--no-resume", action="store_true",
                         help="Rebuild from scratch even if partial cache exists")
     args = parser.parse_args()
 
     for split in args.splits:
-        build_cache(split, sleep_between=args.sleep, resume=not args.no_resume)
+        build_cache(split, sleep_between=args.sleep, resume=not args.no_resume,
+                    max_workers=args.max_workers)
 
 
 if __name__ == "__main__":

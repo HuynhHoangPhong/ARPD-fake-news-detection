@@ -258,33 +258,47 @@ class TestEnsembleFormula:
 # ---------------------------------------------------------------------------
 
 class TestRetrieverUserAgent:
-    """AdaptiveRetriever must send User-Agent header on all requests."""
+    """AdaptiveRetriever must send User-Agent header on all requests.
 
-    def test_requests_get_called_with_user_agent(self):
+    NOTE: bản tối ưu tốc độ (2026-06) dùng 1 requests.Session dùng chung với
+    header set sẵn (session.headers.update), thay vì truyền headers= ở mỗi
+    lệnh gọi requests.get() rời rạc như bản gốc. Test này kiểm tra đúng cơ
+    chế mới: session phải có User-Agent, và mọi call thực tế đi qua session đó.
+    """
+
+    def test_session_has_user_agent_header(self):
         from src.adaptive_retriever import AdaptiveRetriever
 
         retriever = AdaptiveRetriever()
+        assert "User-Agent" in retriever._session.headers, (
+            "AdaptiveRetriever._session phải có User-Agent header sẵn. "
+            "Wikipedia API trả về HTTP 403 nếu thiếu."
+        )
+        assert "ARPD-Research" in retriever._session.headers["User-Agent"]
 
-        with patch("requests.get") as mock_get:
+    def test_fetch_passages_uses_session_not_bare_requests(self):
+        from src.adaptive_retriever import AdaptiveRetriever
+
+        retriever = AdaptiveRetriever(max_workers=1, sleep_between=0.0)
+
+        with patch.object(retriever._session, "get") as mock_get:
             mock_response = MagicMock()
+            mock_response.status_code = 200
             mock_response.json.return_value = {
                 "query": {"search": [{"title": "Obama"}]}
             }
             mock_get.return_value = mock_response
 
             try:
-                retriever._fetch_passages("Obama healthcare bill", k=3)
+                retriever._fetch_passages("Obama healthcare bill", srlimit=3)
             except Exception:
-                pass  # we only care that headers were passed
+                pass  # we only care the call went through the session
 
-            if mock_get.called:
-                _, kwargs = mock_get.call_args
-                headers = kwargs.get("headers", {})
-                assert "User-Agent" in headers, (
-                    "_fetch_passages() called requests.get without a User-Agent header. "
-                    "Wikipedia API returns HTTP 403 without it."
-                )
-
+            assert mock_get.called, (
+                "_fetch_passages() phải gọi qua self._session.get() "
+                "(đã có User-Agent sẵn trong session headers), không tạo "
+                "request trần requests.get() mới."
+            )
 
 # ---------------------------------------------------------------------------
 # Test 7: Paraphrase augmentor
