@@ -112,11 +112,6 @@ def main():
     parser = argparse.ArgumentParser(description="Build Wikipedia evidence cache for LIAR splits")
     parser.add_argument("--splits", nargs="+", default=["train", "val", "test"],
                         choices=["train", "val", "test"])
-    parser.add_argument("--sleep", type=float, default=0.5,
-                        help="Seconds between Wikipedia API calls (default 0.5)")
-    parser.add_argument("--max-workers", type=int, default=16,
-                        help="Số thread song song khi fetch page summaries cho 1 claim "
-                             "(default 16). Đặt 1 để chạy tuần tự như bản gốc.")
     parser.add_argument("--no-resume", action="store_true",
                         help="Rebuild from scratch even if partial cache exists")
     parser.add_argument("--max-claims", type=int, default=None,
