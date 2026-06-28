@@ -12,17 +12,14 @@ Each CSV has columns:
     retrieved_evidence — passages joined with ' [SEP] ' (empty string if none)
 
 Usage:
-    python build_evidence_cache.py [--splits train val test] [--sleep 0.5] [--max-claims N]
+    python build_evidence_cache.py [--splits train val test] [--max-claims N]
 
-Timing estimates (measured on LIAR train, varies with network):
-  --sleep 0.5 (default, polite): ~10-15h on Colab T4, ~40-48h on local machine.
-  --sleep 0.1 (faster, may hit rate limits): ~3-5h on Colab T4.
-Run on Colab with --sleep 0.1 for best speed; resume is safe (checkpoints every 50 claims).
+Note: This uses the optimized Batch API retriever. It natively handles rate limits 
+and does not require artificial sleep or threading parameters.
 """
 
 import sys
 import argparse
-import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -37,8 +34,7 @@ DATA_DIR = Path(__file__).parent / "data" / "processed"
 OUT_DIR = Path(__file__).parent  # cache files go in repo root
 
 
-def build_cache(split: str, sleep_between: float = 0.5, resume: bool = True,
-                 max_workers: int = 16, max_new_claims: int | None = None) -> None:
+def build_cache(split: str, resume: bool = True, max_new_claims: int | None = None) -> None:
     split_file = DATA_DIR / f"liar_{split}.csv"
     if not split_file.exists():
         # Handle 'validation' vs 'val' naming
@@ -69,6 +65,7 @@ def build_cache(split: str, sleep_between: float = 0.5, resume: bool = True,
     rows = []
     new_processed = 0
     stopped_early = False
+    
     for claim in tqdm(claims, desc=split):
         if claim in done:
             rows.append(done[claim])
@@ -90,7 +87,6 @@ def build_cache(split: str, sleep_between: float = 0.5, resume: bool = True,
         new_processed += 1
 
         # Checkpoint every 50 claims so at most ~3-4 min of work is lost on interruption.
-        # (500 was too coarse: at 4s/claim that's 33 min to first save.)
         if len(rows) % 50 == 0:
             pd.DataFrame(rows).to_csv(out_path, index=False)
 
@@ -121,8 +117,7 @@ def main():
     args = parser.parse_args()
 
     for split in args.splits:
-        build_cache(split, sleep_between=args.sleep, resume=not args.no_resume,
-                    max_workers=args.max_workers, max_new_claims=args.max_claims)
+        build_cache(split, resume=not args.no_resume, max_new_claims=args.max_claims)
 
 
 if __name__ == "__main__":
